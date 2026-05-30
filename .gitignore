@@ -1,2 +1,8 @@
 dsa_notes.txt
 .env
+tweet_history.json
+tweet_agent.log
+context.txt
+__pycache__/
+*.pyc
+.venv/

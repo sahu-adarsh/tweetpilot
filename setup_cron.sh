@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Sets up a daily cron job to run the tweet agent at 9:00 AM IST (3:30 AM UTC).
+# Sets up two daily cron windows for the tweet agent.
+# Morning: 8:00-9:30 AM IST  |  Evening: 7:00-8:30 PM IST
+# Each window has a 25% skip rate → ~10-11 posts/week (range 8-12).
 # Run once: bash setup_cron.sh
 
 set -euo pipefail
@@ -23,32 +25,35 @@ echo "Agent path:   $AGENT_PATH"
 echo "Log file:     $LOG_FILE"
 echo ""
 
-# 9:00 AM IST = 03:30 AM UTC
-CRON_SCHEDULE="30 3 * * *"
 CRON_CMD="$PYTHON_PATH $AGENT_PATH >> $LOG_FILE 2>&1"
-CRON_ENTRY="$CRON_SCHEDULE $CRON_CMD"
+# 8:00 AM IST = 02:30 UTC  |  7:00 PM IST = 13:30 UTC
+MORNING_ENTRY="30 2 * * * $CRON_CMD"
+EVENING_ENTRY="30 13 * * * $CRON_CMD"
 
 if crontab -l 2>/dev/null | grep -qF "agent.py"; then
-    echo "A tweet agent cron job already exists:"
+    echo "Existing tweet agent cron entries found:"
     crontab -l | grep "agent.py"
     echo ""
-    read -rp "Replace it? (y/N): " confirm
+    read -rp "Replace them? (y/N): " confirm
     if [[ "${confirm,,}" != "y" ]]; then
         echo "Aborted. No changes made."
         exit 0
     fi
     (crontab -l 2>/dev/null | grep -vF "agent.py") | crontab -
-    echo "Removed existing entry."
+    echo "Removed existing entries."
 fi
 
-(crontab -l 2>/dev/null; echo "$CRON_ENTRY") | crontab -
+(crontab -l 2>/dev/null; echo "$MORNING_ENTRY"; echo "$EVENING_ENTRY") | crontab -
 
 echo ""
-echo "Cron job installed! Tweet will post daily at 9:00 AM IST."
+echo "Two cron windows installed:"
+echo "  Morning: 8:00-9:30 AM IST"
+echo "  Evening: 7:00-8:30 PM IST"
+echo "  Target:  ~10 tweets/week (range 8-12)"
 echo ""
 echo "Verify with:  crontab -l"
 echo "Watch logs:   tail -f $LOG_FILE"
-echo "Remove:       crontab -e  (then delete the agent.py line)"
+echo "Remove:       crontab -e  (delete both agent.py lines)"
 echo ""
 echo "NOTE: On macOS, cron requires Full Disk Access."
 echo "  System Settings → Privacy & Security → Full Disk Access → enable 'cron'"

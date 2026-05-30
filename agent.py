@@ -12,6 +12,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
+CONTEXT_FILE = Path(__file__).parent / "context.txt"
+
+SKIP_PROBABILITY = 0.25   # 25% skip per run → ~10.5 posts/week across 2 daily windows
+MAX_DELAY_SECONDS = 5400  # up to 90 min after cron fires
+MAX_TWEETS_PER_DAY = 2    # hard cap so back-to-back runs can't over-post
 
 PERSONA = """
 You are ghostwriting a tweet for Adarsh Sahu (@adarshsahu27), a 23-year-old Senior Software Engineer at HCLTech in Bangalore.
@@ -109,12 +115,29 @@ def save_history(history: list[dict], tweet_text: str) -> None:
     HISTORY_FILE.write_text(json.dumps(history[-30:], indent=2))
 
 
+def tweets_today(history: list[dict]) -> int:
+    today = datetime.now().date().isoformat()
+    return sum(1 for t in history if t["date"].startswith(today))
+
+
+def load_context() -> str:
+    """Read non-comment lines from context.txt, clear them, keep the comment template."""
+    if not CONTEXT_FILE.exists():
+        return ""
+    lines = CONTEXT_FILE.read_text().splitlines()
+    comments = [l for l in lines if l.startswith("#") or l.strip() == ""]
+    content_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+    if content_lines:
+        CONTEXT_FILE.write_text("\n".join(comments) + "\n")
+    return " ".join(content_lines)
+
+
 def sanitize_tweet(text: str) -> str:
     # Hard backstop: replace em/en dashes regardless of what the model outputs
     return text.replace("—", ",").replace("–", "-").strip()
 
 
-def generate_tweet(history: list[dict]) -> str:
+def generate_tweet(history: list[dict], context: str = "") -> str:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     day = datetime.now().strftime("%A")
@@ -127,8 +150,13 @@ def generate_tweet(history: list[dict]) -> str:
         f"- {t['tweet'][:120]}" for t in history[-7:]
     ) if history else "None yet."
 
-    prompt = f"""Today is {day}, {date_str}. Day context: {day_hint}.
+    context_section = (
+        f"\nWhat Adarsh is actually doing / thinking today (use this as the seed — make the tweet feel like a reaction to his real day):\n{context}\n"
+        if context else ""
+    )
 
+    prompt = f"""Today is {day}, {date_str}. Day context: {day_hint}.
+{context_section}
 {PERSONA}
 
 Write ONE tweet for Adarsh to post today.
@@ -173,11 +201,33 @@ def post_tweet(tweet_text: str) -> str:
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     history = load_history()
-    tweet = generate_tweet(history)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Hard daily cap — prevents double-posting if cron windows overlap
+    if not dry_run and tweets_today(history) >= MAX_TWEETS_PER_DAY:
+        print(f"[{timestamp}] Already hit {MAX_TWEETS_PER_DAY} tweets today. Skipping.")
+        return
+
+    # Random skip (~25% per run) — keeps weekly cadence feeling organic
+    if not dry_run and random.random() < SKIP_PROBABILITY:
+        print(f"[{timestamp}] Skipping this window.")
+        return
+
+    # Random delay so posts don't land at the exact cron-fire time
+    if not dry_run:
+        delay = random.randint(0, MAX_DELAY_SECONDS)
+        print(f"[{timestamp}] Waiting {delay // 60}m {delay % 60}s before posting...")
+        time.sleep(delay)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    context = load_context()
+    if context:
+        print(f"[{timestamp}] Using context: {context[:80]}{'...' if len(context) > 80 else ''}")
+
+    tweet = generate_tweet(history, context)
+
     char_count = len(tweet)
     print(f"[{timestamp}] Generated tweet ({char_count} chars):")
     print(f"\n  {tweet}\n")
