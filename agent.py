@@ -11,6 +11,7 @@ Usage:
 import json
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime
@@ -25,6 +26,7 @@ load_dotenv()
 
 HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
 CONTEXT_FILE = Path(__file__).parent / "context.txt"
+REPLIES_FILE = Path(__file__).parent / "replies.txt"
 
 SKIP_PROBABILITY = 0.25        # 25% skip per run → ~10.5 posts/week across 2 daily windows
 MAX_DELAY_SECONDS = 5400       # up to 90 min after cron fires
@@ -156,6 +158,79 @@ def fetch_hn_headlines(n: int = 5) -> list[str]:
         return []
 
 
+def load_reply_target() -> tuple[str | None, str, bool]:
+    """
+    Parse replies.txt for a pending reply or quote-tweet.
+    Line format:
+      <tweet_url_or_id> :: <what the tweet says / your angle>     → reply
+      QT <tweet_url_or_id> :: <what the tweet says / your angle>  → quote-tweet
+    Returns (tweet_id, context, is_quote). Removes only the consumed line, keeps comments.
+    """
+    if not REPLIES_FILE.exists():
+        return None, "", False
+
+    lines = REPLIES_FILE.read_text().splitlines()
+    comments = [l for l in lines if l.startswith("#") or l.strip() == ""]
+    entries = [l for l in lines if not l.startswith("#") and l.strip()]
+
+    for entry in entries:
+        raw = entry.strip()
+        is_quote = raw.upper().startswith("QT ")
+        if is_quote:
+            raw = raw[3:].strip()
+        if "::" not in raw:
+            continue  # skip malformed lines, don't remove them
+
+        url_part, context = raw.split("::", 1)
+        url_part = url_part.strip()
+        context = context.strip()
+        match = re.search(r"/status/(\d+)", url_part)
+        tweet_id = match.group(1) if match else re.sub(r"\D", "", url_part)
+
+        if not tweet_id:
+            continue
+
+        # Remove only this entry
+        remaining = [e for e in entries if e != entry]
+        REPLIES_FILE.write_text("\n".join(comments + remaining) + "\n")
+        return tweet_id, context, is_quote
+
+    return None, "", False
+
+
+def generate_reply(tweet_context: str, is_quote: bool) -> str:
+    """Generate a reply or quote-tweet given a plain-text summary of the original tweet."""
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    mode = "quote-tweet" if is_quote else "reply"
+    prompt = f"""You are ghostwriting a {mode} for Adarsh Sahu (@adarshsahu27).
+
+{PERSONA}
+
+The tweet Adarsh is responding to:
+"{tweet_context}"
+
+Write ONE {mode} from Adarsh.
+
+Rules:
+- Max 240 characters (leave room for the quoted URL if it's a QT)
+- Do NOT start with "@" — Twitter adds the handle automatically for replies
+- Add something: a personal angle, a number from his own experience, a counterpoint, or a specific detail that makes the reply worth reading
+- Do not just agree or just say "this" — add actual signal
+- No em dashes (— or –). Use comma or colon instead.
+- No automated-sounding openers
+- Write in first person as Adarsh
+- Output ONLY the tweet text, nothing else"""
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = message.content[0].text.strip().strip('"').strip("'")
+    return sanitize_tweet(raw)
+
+
 def sanitize_tweet(text: str) -> str:
     # Hard backstop: replace em/en dashes regardless of what the model outputs
     return text.replace("—", ",").replace("–", "-").strip()
@@ -231,14 +306,23 @@ Rules:
     return sanitize_tweet(raw)
 
 
-def post_tweet(tweet_text: str) -> str:
+def post_tweet(
+    tweet_text: str,
+    reply_to_id: str | None = None,
+    quote_id: str | None = None,
+) -> str:
     client = tweepy.Client(
         consumer_key=os.environ["TWITTER_API_KEY"],
         consumer_secret=os.environ["TWITTER_API_SECRET"],
         access_token=os.environ["TWITTER_ACCESS_TOKEN"],
         access_token_secret=os.environ["TWITTER_ACCESS_TOKEN_SECRET"],
     )
-    response = client.create_tweet(text=tweet_text)
+    kwargs: dict = {"text": tweet_text}
+    if reply_to_id:
+        kwargs["in_reply_to_tweet_id"] = reply_to_id
+    if quote_id:
+        kwargs["quote_tweet_id"] = quote_id
+    response = client.create_tweet(**kwargs)
     return response.data["id"]
 
 
@@ -265,6 +349,30 @@ def main() -> None:
         time.sleep(delay)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Reply / quote-tweet takes priority over original tweet for this window
+    reply_id, reply_context, is_quote = load_reply_target()
+    if reply_id:
+        mode = "Quote-tweet" if is_quote else "Reply"
+        print(f"[{timestamp}] {mode} target: {reply_id} — {reply_context[:60]}...")
+        tweet = generate_reply(reply_context, is_quote)
+        char_count = len(tweet)
+        print(f"[{timestamp}] Generated {mode.lower()} ({char_count} chars):\n\n  {tweet}\n")
+        if dry_run:
+            print("[DRY RUN] Skipping post.")
+            return
+        try:
+            tweet_id = post_tweet(
+                tweet,
+                reply_to_id=None if is_quote else reply_id,
+                quote_id=reply_id if is_quote else None,
+            )
+            save_history(history, tweet)
+            print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
+        except tweepy.errors.TweepyException as e:
+            print(f"[ERROR] Failed to post: {e}")
+            sys.exit(1)
+        return
+
     context = load_context()
     if context:
         print(f"[{timestamp}] Using context: {context[:80]}{'...' if len(context) > 80 else ''}")
@@ -280,8 +388,7 @@ def main() -> None:
     tweet = generate_tweet(history, context, headlines, short)
 
     char_count = len(tweet)
-    print(f"[{timestamp}] Generated tweet ({char_count} chars):")
-    print(f"\n  {tweet}\n")
+    print(f"[{timestamp}] Generated tweet ({char_count} chars):\n\n  {tweet}\n")
 
     if char_count > 280:
         print(f"[WARN] Tweet is {char_count} chars — Twitter limit is 280. Truncating risk.")

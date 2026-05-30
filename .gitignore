@@ -3,6 +3,7 @@ dsa_notes.txt
 tweet_history.json
 tweet_agent.log
 context.txt
+replies.txt
 __pycache__/
 *.pyc
 .venv/
