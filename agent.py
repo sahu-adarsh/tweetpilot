@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
+import requests
 import tweepy
 from dotenv import load_dotenv
 
@@ -25,9 +26,10 @@ load_dotenv()
 HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
 CONTEXT_FILE = Path(__file__).parent / "context.txt"
 
-SKIP_PROBABILITY = 0.25   # 25% skip per run → ~10.5 posts/week across 2 daily windows
-MAX_DELAY_SECONDS = 5400  # up to 90 min after cron fires
-MAX_TWEETS_PER_DAY = 2    # hard cap so back-to-back runs can't over-post
+SKIP_PROBABILITY = 0.25        # 25% skip per run → ~10.5 posts/week across 2 daily windows
+MAX_DELAY_SECONDS = 5400       # up to 90 min after cron fires
+MAX_TWEETS_PER_DAY = 2         # hard cap so back-to-back runs can't over-post
+SHORT_TWEET_PROBABILITY = 0.30 # 30% chance of a single-sentence sub-80-char tweet
 
 PERSONA = """
 You are ghostwriting a tweet for Adarsh Sahu (@adarshsahu27), a 23-year-old Senior Software Engineer at HCLTech in Bangalore.
@@ -132,12 +134,39 @@ def load_context() -> str:
     return " ".join(content_lines)
 
 
+def fetch_hn_headlines(n: int = 5) -> list[str]:
+    """Fetch top HN story titles. Returns empty list on any network failure."""
+    try:
+        ids = requests.get(
+            "https://hacker-news.firebaseio.com/v0/topstories.json",
+            timeout=5,
+        ).json()[:20]
+        titles = []
+        for story_id in ids:
+            if len(titles) >= n:
+                break
+            item = requests.get(
+                f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json",
+                timeout=5,
+            ).json()
+            if item.get("type") == "story" and item.get("title"):
+                titles.append(item["title"])
+        return titles
+    except Exception:
+        return []
+
+
 def sanitize_tweet(text: str) -> str:
     # Hard backstop: replace em/en dashes regardless of what the model outputs
     return text.replace("—", ",").replace("–", "-").strip()
 
 
-def generate_tweet(history: list[dict], context: str = "") -> str:
+def generate_tweet(
+    history: list[dict],
+    context: str = "",
+    headlines: list[str] | None = None,
+    short: bool = False,
+) -> str:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     day = datetime.now().strftime("%A")
@@ -151,12 +180,27 @@ def generate_tweet(history: list[dict], context: str = "") -> str:
     ) if history else "None yet."
 
     context_section = (
-        f"\nWhat Adarsh is actually doing / thinking today (use this as the seed — make the tweet feel like a reaction to his real day):\n{context}\n"
+        f"\nWhat Adarsh is actually doing / thinking today (use this as the seed):\n{context}\n"
         if context else ""
     )
 
+    hn_section = ""
+    if headlines:
+        hn_section = (
+            "\nToday's top HackerNews headlines — use one as a jumping-off point ONLY if it"
+            " genuinely connects to your stack or interests. If none fit, ignore them all:\n"
+            + "\n".join(f"- {h}" for h in headlines)
+            + "\n"
+        )
+
+    length_rule = (
+        "- ONE sentence only, under 80 characters, no hashtags"
+        if short else
+        "- Max 260 characters\n- 0-1 hashtags, only if it genuinely fits, at the end"
+    )
+
     prompt = f"""Today is {day}, {date_str}. Day context: {day_hint}.
-{context_section}
+{context_section}{hn_section}
 {PERSONA}
 
 Write ONE tweet for Adarsh to post today.
@@ -168,8 +212,7 @@ Recent tweets (avoid repeating the same topic or shape):
 {recent}
 
 Rules:
-- Max 260 characters
-- 0-1 hashtags, only if it genuinely fits, at the end
+{length_rule}
 - NO em dashes (— or –). Use a comma, period, or colon instead.
 - NO automated-sounding openers or closers of any kind
 - NO perfect 3-part structure (hook / detail / takeaway)
@@ -226,7 +269,15 @@ def main() -> None:
     if context:
         print(f"[{timestamp}] Using context: {context[:80]}{'...' if len(context) > 80 else ''}")
 
-    tweet = generate_tweet(history, context)
+    headlines = fetch_hn_headlines()
+    if headlines:
+        print(f"[{timestamp}] Fetched {len(headlines)} HN headlines.")
+
+    short = random.random() < SHORT_TWEET_PROBABILITY
+    if short:
+        print(f"[{timestamp}] Short tweet mode.")
+
+    tweet = generate_tweet(history, context, headlines, short)
 
     char_count = len(tweet)
     print(f"[{timestamp}] Generated tweet ({char_count} chars):")
