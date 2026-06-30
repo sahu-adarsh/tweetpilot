@@ -17,12 +17,49 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
 import requests
 import tweepy
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
+
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(
+            base_url=os.environ["AZURE_INFERENCE_ENDPOINT"],
+            api_key=os.environ["AZURE_INFERENCE_KEY"],
+        )
+    return _client
+
+
+def invoke_claude_json(messages: list[dict], max_tokens: int = 350) -> str:
+    response = _get_client().chat.completions.create(
+        model=os.environ["AZURE_INFERENCE_MODEL"],
+        max_completion_tokens=max_tokens,
+        messages=messages,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def invoke_claude_stream(messages: list[dict], max_tokens: int = 350) -> str:
+    stream = _get_client().chat.completions.create(
+        model=os.environ["AZURE_INFERENCE_MODEL"],
+        max_completion_tokens=max_tokens,
+        messages=messages,
+        stream=True,
+    )
+    parts = []
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            parts.append(delta)
+    return "".join(parts)
+
 
 HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
 CONTEXT_FILE = Path(__file__).parent / "context.txt"
@@ -200,8 +237,6 @@ def load_reply_target() -> tuple[str | None, str, bool]:
 
 def generate_reply(tweet_context: str, is_quote: bool) -> str:
     """Generate a reply or quote-tweet given a plain-text summary of the original tweet."""
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     mode = "quote-tweet" if is_quote else "reply"
     prompt = f"""You are ghostwriting a {mode} for Adarsh Sahu (@adarshsahu27).
 
@@ -222,13 +257,11 @@ Rules:
 - Write in first person as Adarsh
 - Output ONLY the tweet text, nothing else"""
 
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
+    raw = invoke_claude_json(
         messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
     )
-    raw = message.content[0].text.strip().strip('"').strip("'")
-    return sanitize_tweet(raw)
+    return sanitize_tweet(raw.strip('"').strip("'"))
 
 
 def sanitize_tweet(text: str) -> str:
@@ -242,8 +275,6 @@ def generate_tweet(
     headlines: list[str] | None = None,
     short: bool = False,
 ) -> str:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     day = datetime.now().strftime("%A")
     date_str = datetime.now().strftime("%B %d, %Y")
     day_hint = DAY_CONTEXT.get(day, "")
@@ -296,14 +327,11 @@ Rules:
 - Write in first person as Adarsh
 - Output ONLY the tweet text, nothing else"""
 
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=350,
+    raw = invoke_claude_stream(
         messages=[{"role": "user", "content": prompt}],
+        max_tokens=350,
     )
-
-    raw = message.content[0].text.strip().strip('"').strip("'")
-    return sanitize_tweet(raw)
+    return sanitize_tweet(raw.strip('"').strip("'"))
 
 
 def post_tweet(
