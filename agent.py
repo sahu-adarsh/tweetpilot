@@ -73,7 +73,9 @@ SESSION_FILE = Path(__file__).parent / "tw_session.json"
 SKIP_PROBABILITY = 0.10        # 10% skip per run → ~5 posts/day across 6 daily windows
 MAX_DELAY_SECONDS = 1800       # up to 30 min after cron fires (keeps posts in their window)
 MAX_TWEETS_PER_DAY = 6         # hard cap so back-to-back runs can't over-post
-SHORT_TWEET_PROBABILITY = 0.30 # 30% chance of a single-sentence sub-80-char tweet
+SHORT_TWEET_PROBABILITY = 0.20 # 20% chance of a single-sentence sub-80-char tweet
+THREAD_PROBABILITY = 0.20      # 20% chance of a 2-3 tweet thread instead of single tweet
+HN_TAKE_PROBABILITY = 0.20     # 20% chance of a direct opinionated take on the top HN story
 
 PERSONA = """
 You are ghostwriting a tweet for Adarsh Sahu (@adarshsahu27), a 23-year-old Senior Software Engineer at HCLTech in Bangalore.
@@ -111,6 +113,26 @@ BAD tweet examples (avoid these patterns entirely):
 - "Excited to share that I've been working on [project]! Key learnings: 1) ... 2) ... 3) ..."
 - Anything with em dashes (— or –)
 - Anything that sounds like a LinkedIn post
+"""
+
+MENTION_GUIDE = """
+@mentions — add ONLY when the tweet is specifically about that tool/company (never forced):
+- LangGraph, LangChain, LangSmith → @LangChainAI
+- Deepgram → @DeepgramAI
+- AWS, Bedrock, Lambda, SageMaker → @awscloud
+- Azure, Azure AI Foundry → @Azure
+- LeetCode → @LeetCode
+- FastAPI → @tiangolo
+- OpenAI, GPT → @OpenAI
+- HuggingFace → @huggingface
+- Supabase → @supabase
+- Redis → @Redisinc
+Place @mention naturally in the tweet body or at the very end. Never start the tweet with @.
+"""
+
+HASHTAG_GUIDE = """
+Hashtags — 0-2 at the end, only if they genuinely fit (do not force them):
+#Python #FastAPI #asyncio #LLM #AI #MLOps #LangChain #AWS #Azure #LeetCode #DSA #RAG #BuildInPublic #AIEngineering
 """
 
 CONTENT_BUCKETS = [
@@ -305,9 +327,9 @@ def generate_tweet(
         )
 
     length_rule = (
-        "- ONE sentence only, under 80 characters, no hashtags"
+        "- ONE sentence only, under 80 characters, no hashtags, no @mentions"
         if short else
-        "- Max 260 characters\n- 0-1 hashtags, only if it genuinely fits, at the end"
+        f"- Max 260 characters\n{MENTION_GUIDE}\n{HASHTAG_GUIDE}"
     )
 
     prompt = f"""Today is {day}, {date_str}. Day context: {day_hint}.
@@ -329,6 +351,7 @@ Rules:
 - NO perfect 3-part structure (hook / detail / takeaway)
 - NO "What do you think?", "Let me know", "Drop a comment"
 - Specific over vague: real tech names, real numbers, real tradeoffs
+- Drop real metrics where relevant: latency in ms, F1 scores, cost per session, counts
 - Write in first person as Adarsh
 - Output ONLY the tweet text, nothing else"""
 
@@ -337,6 +360,107 @@ Rules:
         max_tokens=350,
     )
     return sanitize_tweet(raw.strip('"').strip("'"))
+
+
+def generate_thread(
+    history: list[dict],
+    context: str = "",
+    headlines: list[str] | None = None,
+) -> list[str]:
+    """Generate a 2-3 tweet thread. Returns a list of tweet strings."""
+    day = datetime.now().strftime("%A")
+    date_str = datetime.now().strftime("%B %d, %Y")
+    content_bucket = random.choice(CONTENT_BUCKETS)
+    recent = "\n".join(f"- {t['tweet'][:120]}" for t in history[-7:]) if history else "None yet."
+    context_section = f"\nContext: {context}\n" if context else ""
+    hn_section = (
+        "\nTop HN headlines for context:\n" + "\n".join(f"- {h}" for h in headlines) + "\n"
+        if headlines else ""
+    )
+
+    prompt = f"""Today is {day}, {date_str}.
+{context_section}{hn_section}
+{PERSONA}
+
+Write a Twitter THREAD of 2-3 tweets for Adarsh.
+
+Content angle: {content_bucket}
+
+Recent tweets (avoid repeating):
+{recent}
+
+Rules:
+- Tweet 1: the hook. One sharp result, observation, or number. Max 240 chars.
+- Tweet 2: expand with specifics — what you did, what surprised you, a contrast. Max 260 chars.
+- Tweet 3 (optional): a takeaway, a question, or something that reframes tweet 1. Max 200 chars. Only include if it genuinely adds value.
+- Each tweet must read well standalone AND connect to the others as a thread.
+- Do NOT number the tweets (no "1/", "2/", "🧵").
+- Do NOT open with "Thread:" or any announcement.
+- No em dashes (— or –).
+- Real numbers, real tool names, real tradeoffs.
+{MENTION_GUIDE}
+{HASHTAG_GUIDE}
+- Write in first person as Adarsh.
+
+Output ONLY a JSON array of 2 or 3 tweet strings. No explanation, no markdown.
+Example: ["tweet one", "tweet two", "tweet three"]"""
+
+    raw = invoke_claude_json(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=800,
+    )
+    match = re.search(r"\[.*?\]", raw, re.DOTALL)
+    if not match:
+        return [sanitize_tweet(raw)]
+    tweets = json.loads(match.group())
+    return [sanitize_tweet(str(t).strip('"').strip("'")) for t in tweets]
+
+
+def generate_hn_take(headline: str, history: list[dict]) -> str:
+    """Generate a direct opinionated tweet reacting to a top HN headline."""
+    recent = "\n".join(f"- {t['tweet'][:120]}" for t in history[-5:]) if history else "None yet."
+
+    prompt = f"""You are ghostwriting a tweet for Adarsh Sahu (@adarshsahu27).
+
+{PERSONA}
+
+Top HackerNews story right now: "{headline}"
+
+Write ONE tweet where Adarsh gives his genuine opinion or a sharp related insight about this topic.
+
+Rules:
+- Max 260 characters
+- Must connect to Adarsh's actual experience (AI engineering, Python, LangGraph, Intervyu.io, Epistlo, LeetCode, BJJ)
+- If the story isn't relevant to his background, pivot to a related real experience instead of forcing it
+- Specific over vague: real numbers, real tools, real tradeoffs
+- Drop real metrics where relevant: latency in ms, F1, cost/session
+{MENTION_GUIDE}
+{HASHTAG_GUIDE}
+- No em dashes (— or –)
+- No "Hot take:", no preamble
+- Write in first person as Adarsh
+
+Recent tweets (avoid repeating shape or topic):
+{recent}
+
+Output ONLY the tweet text, nothing else."""
+
+    raw = invoke_claude_stream(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=350,
+    )
+    return sanitize_tweet(raw.strip('"').strip("'"))
+
+
+def post_thread(tweets: list[str]) -> list[str]:
+    """Post a thread. Returns list of tweet IDs."""
+    ids = []
+    reply_to = None
+    for tweet in tweets:
+        tweet_id = post_tweet(tweet, reply_to_id=reply_to)
+        ids.append(tweet_id)
+        reply_to = tweet_id
+    return ids
 
 
 async def _post_tweet_async(
@@ -461,29 +585,61 @@ def main() -> None:
     if headlines:
         print(f"[{timestamp}] Fetched {len(headlines)} HN headlines.")
 
-    short = random.random() < SHORT_TWEET_PROBABILITY
-    if short:
-        print(f"[{timestamp}] Short tweet mode.")
+    roll = random.random()
 
-    tweet = generate_tweet(history, context, headlines, short)
+    # --- Thread mode (20%) ---
+    if roll < THREAD_PROBABILITY:
+        print(f"[{timestamp}] Thread mode.")
+        tweets = generate_thread(history, context, headlines)
+        for i, t in enumerate(tweets, 1):
+            print(f"[{timestamp}] Thread tweet {i}/{len(tweets)} ({len(t)} chars):\n\n  {t}\n")
+        if dry_run:
+            print("[DRY RUN] Skipping post.")
+            return
+        try:
+            ids = post_thread(tweets)
+            for tweet_text, tweet_id in zip(tweets, ids):
+                save_history(history, tweet_text)
+                print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to post thread: {e}")
+            sys.exit(1)
 
-    char_count = len(tweet)
-    print(f"[{timestamp}] Generated tweet ({char_count} chars):\n\n  {tweet}\n")
+    # --- HN take mode (20%) ---
+    elif roll < THREAD_PROBABILITY + HN_TAKE_PROBABILITY and headlines:
+        print(f"[{timestamp}] HN take mode: {headlines[0][:60]}...")
+        tweet = generate_hn_take(headlines[0], history)
+        print(f"[{timestamp}] Generated tweet ({len(tweet)} chars):\n\n  {tweet}\n")
+        if dry_run:
+            print("[DRY RUN] Skipping post.")
+            return
+        try:
+            tweet_id = post_tweet(tweet)
+            save_history(history, tweet)
+            print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to post tweet: {e}")
+            sys.exit(1)
 
-    if char_count > 280:
-        print(f"[WARN] Tweet is {char_count} chars — Twitter limit is 280. Truncating risk.")
-
-    if dry_run:
-        print("[DRY RUN] Skipping post. Remove --dry-run to go live.")
-        return
-
-    try:
-        tweet_id = post_tweet(tweet)
-        save_history(history, tweet)
-        print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
-    except Exception as e:
-        print(f"[ERROR] Failed to post tweet: {e}")
-        sys.exit(1)
+    # --- Regular single tweet (60%) ---
+    else:
+        short = random.random() < SHORT_TWEET_PROBABILITY
+        if short:
+            print(f"[{timestamp}] Short tweet mode.")
+        tweet = generate_tweet(history, context, headlines, short)
+        print(f"[{timestamp}] Generated tweet ({len(tweet)} chars):\n\n  {tweet}\n")
+        if len(tweet) > 280:
+            print(f"[WARN] Tweet is {len(tweet)} chars — over 280 limit.")
+        if dry_run:
+            print("[DRY RUN] Skipping post.")
+            return
+        try:
+            tweet_id = post_tweet(tweet)
+            save_history(history, tweet)
+            print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to post tweet: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
