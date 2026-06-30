@@ -65,9 +65,9 @@ HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
 CONTEXT_FILE = Path(__file__).parent / "context.txt"
 REPLIES_FILE = Path(__file__).parent / "replies.txt"
 
-SKIP_PROBABILITY = 0.25        # 25% skip per run → ~10.5 posts/week across 2 daily windows
-MAX_DELAY_SECONDS = 5400       # up to 90 min after cron fires
-MAX_TWEETS_PER_DAY = 2         # hard cap so back-to-back runs can't over-post
+SKIP_PROBABILITY = 0.10        # 10% skip per run → ~3-4 posts/day across 4 daily windows
+MAX_DELAY_SECONDS = 1800       # up to 30 min after launchd fires (keeps posts in their window)
+MAX_TWEETS_PER_DAY = 4         # hard cap so back-to-back runs can't over-post
 SHORT_TWEET_PROBABILITY = 0.30 # 30% chance of a single-sentence sub-80-char tweet
 
 PERSONA = """
