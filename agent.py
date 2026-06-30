@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.async_api import async_playwright
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
 
 _client: OpenAI | None = None
 
