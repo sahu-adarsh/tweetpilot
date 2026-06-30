@@ -70,9 +70,9 @@ CONTEXT_FILE = Path(__file__).parent / "context.txt"
 REPLIES_FILE = Path(__file__).parent / "replies.txt"
 SESSION_FILE = Path(__file__).parent / "tw_session.json"
 
-SKIP_PROBABILITY = 0.10        # 10% skip per run → ~3-4 posts/day across 4 daily windows
-MAX_DELAY_SECONDS = 1800       # up to 30 min after launchd fires (keeps posts in their window)
-MAX_TWEETS_PER_DAY = 4         # hard cap so back-to-back runs can't over-post
+SKIP_PROBABILITY = 0.10        # 10% skip per run → ~5 posts/day across 6 daily windows
+MAX_DELAY_SECONDS = 1800       # up to 30 min after cron fires (keeps posts in their window)
+MAX_TWEETS_PER_DAY = 6         # hard cap so back-to-back runs can't over-post
 SHORT_TWEET_PROBABILITY = 0.30 # 30% chance of a single-sentence sub-80-char tweet
 
 PERSONA = """
