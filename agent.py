@@ -17,10 +17,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import asyncio
+
 import requests
-import tweepy
 from dotenv import load_dotenv
 from openai import OpenAI
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -66,6 +68,7 @@ def invoke_claude_stream(messages: list[dict], max_tokens: int = 350) -> str:
 HISTORY_FILE = Path(__file__).parent / "tweet_history.json"
 CONTEXT_FILE = Path(__file__).parent / "context.txt"
 REPLIES_FILE = Path(__file__).parent / "replies.txt"
+SESSION_FILE = Path(__file__).parent / "tw_session.json"
 
 SKIP_PROBABILITY = 0.10        # 10% skip per run → ~3-4 posts/day across 4 daily windows
 MAX_DELAY_SECONDS = 1800       # up to 30 min after launchd fires (keeps posts in their window)
@@ -336,24 +339,71 @@ Rules:
     return sanitize_tweet(raw.strip('"').strip("'"))
 
 
+async def _post_tweet_async(
+    tweet_text: str,
+    reply_to_id: str | None = None,
+    quote_id: str | None = None,
+) -> str:
+    if not SESSION_FILE.exists():
+        raise RuntimeError("No Twitter session found. Run: python3 tw_setup.py")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(storage_state=str(SESSION_FILE))
+        page = await context.new_page()
+
+        tweet_id = None
+
+        async def on_response(response):
+            nonlocal tweet_id
+            if "CreateTweet" in response.url and tweet_id is None:
+                try:
+                    body = await response.json()
+                    tweet_id = body["data"]["create_tweet"]["tweet_results"]["result"]["rest_id"]
+                except Exception:
+                    pass
+
+        page.on("response", on_response)
+
+        async def type_into_composer(text: str) -> None:
+            # Click the placeholder ("What is happening?!") to activate the compose box
+            placeholder = page.locator('[data-testid="tweetTextarea_0placeholder"]')
+            if await placeholder.count() > 0:
+                await placeholder.first.click()
+            textarea = page.locator('[data-testid="tweetTextarea_0"]').first
+            await textarea.wait_for(state="visible", timeout=10000)
+            await textarea.click()
+            await page.keyboard.type(text, delay=50)
+            await page.wait_for_selector(
+                '[data-testid="tweetButtonInline"]:not([disabled])', timeout=10000
+            )
+
+        if reply_to_id:
+            await page.goto(f"https://x.com/i/status/{reply_to_id}")
+            await page.wait_for_selector('[data-testid="reply"]', timeout=15000)
+            await page.click('[data-testid="reply"]')
+            await type_into_composer(tweet_text)
+            await page.locator('[data-testid="tweetButton"]').last.click()
+        elif quote_id:
+            await page.goto("https://x.com/home")
+            await type_into_composer(f"{tweet_text} https://x.com/i/status/{quote_id}")
+            await page.locator('[data-testid="tweetButtonInline"]').first.click()
+        else:
+            await page.goto("https://x.com/home")
+            await type_into_composer(tweet_text)
+            await page.locator('[data-testid="tweetButtonInline"]').first.click()
+
+        await page.wait_for_timeout(4000)
+        await browser.close()
+        return tweet_id or "unknown"
+
+
 def post_tweet(
     tweet_text: str,
     reply_to_id: str | None = None,
     quote_id: str | None = None,
 ) -> str:
-    client = tweepy.Client(
-        consumer_key=os.environ["TWITTER_API_KEY"],
-        consumer_secret=os.environ["TWITTER_API_SECRET"],
-        access_token=os.environ["TWITTER_ACCESS_TOKEN"],
-        access_token_secret=os.environ["TWITTER_ACCESS_TOKEN_SECRET"],
-    )
-    kwargs: dict = {"text": tweet_text}
-    if reply_to_id:
-        kwargs["in_reply_to_tweet_id"] = reply_to_id
-    if quote_id:
-        kwargs["quote_tweet_id"] = quote_id
-    response = client.create_tweet(**kwargs)
-    return response.data["id"]
+    return asyncio.run(_post_tweet_async(tweet_text, reply_to_id, quote_id))
 
 
 def main() -> None:
@@ -398,7 +448,7 @@ def main() -> None:
             )
             save_history(history, tweet)
             print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
-        except tweepy.errors.TweepyException as e:
+        except Exception as e:
             print(f"[ERROR] Failed to post: {e}")
             sys.exit(1)
         return
@@ -431,7 +481,7 @@ def main() -> None:
         tweet_id = post_tweet(tweet)
         save_history(history, tweet)
         print(f"[{timestamp}] Posted! https://twitter.com/adarshsahu27/status/{tweet_id}")
-    except tweepy.errors.TweepyException as e:
+    except Exception as e:
         print(f"[ERROR] Failed to post tweet: {e}")
         sys.exit(1)
 
