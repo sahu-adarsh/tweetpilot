@@ -7,3 +7,4 @@ replies.txt
 __pycache__/
 *.pyc
 .venv/
+tw_session.json
