@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs a launchd agent to run the tweet agent twice daily.
+# Installs a launchd agent to run the tweet agent once daily.
 # Unlike cron, launchd queues missed jobs and runs them when the Mac wakes from sleep.
 # Run once: bash setup_launchd.sh
 
@@ -47,16 +47,10 @@ cat > "$PLIST_PATH" << EOF
     </array>
 
     <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>30</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>19</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-    </array>
+    <dict>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>$LOG_FILE</string>
@@ -86,8 +80,7 @@ echo ""
 echo "launchd agent installed!"
 echo ""
 echo "Schedule (IST, local time):"
-echo "  Morning: 8:30 AM"
-echo "  Evening: 7:00 PM"
+echo "  Daily: 9:00 AM"
 echo "  Missed jobs fire on next wake — no tweets lost to sleep."
 echo ""
 echo "Useful commands:"

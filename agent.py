@@ -4,8 +4,9 @@ Daily Twitter agent for Adarsh Sahu (@adarshsahu27).
 Generates and posts one engaging tweet per day using Claude Haiku.
 
 Usage:
-    python agent.py            # Generate and post
+    python agent.py            # Generate and post (with a randomized delay)
     python agent.py --dry-run  # Generate only, do not post
+    python agent.py --now      # Generate and post immediately, no delay
 """
 
 import json
@@ -70,12 +71,12 @@ CONTEXT_FILE = Path(__file__).parent / "context.txt"
 REPLIES_FILE = Path(__file__).parent / "replies.txt"
 SESSION_FILE = Path(__file__).parent / "tw_session.json"
 
-SKIP_PROBABILITY = 0.10        # 10% skip per run → ~5 posts/day across 6 daily windows
-MAX_DELAY_SECONDS = 1800       # up to 30 min after cron fires (keeps posts in their window)
-MAX_TWEETS_PER_DAY = 6         # hard cap so back-to-back runs can't over-post
-SHORT_TWEET_PROBABILITY = 0.20 # 20% chance of a single-sentence sub-80-char tweet
-THREAD_PROBABILITY = 0.20      # 20% chance of a 2-3 tweet thread instead of single tweet
-HN_TAKE_PROBABILITY = 0.20     # 20% chance of a direct opinionated take on the top HN story
+SKIP_PROBABILITY = 0.0         # no skipping — the single daily window must always post
+MAX_DELAY_SECONDS = 1800       # up to 30 min after the daily job fires (keeps timing organic)
+MAX_TWEETS_PER_DAY = 1         # hard cap — exactly one tweet per day
+SHORT_TWEET_PROBABILITY = 0.20 # 20% chance of a single-sentence sub-100-char tweet
+THREAD_PROBABILITY = 0.15      # 15% chance of a 2-3 tweet thread instead of a single tweet
+HN_TAKE_PROBABILITY = 0.30     # 30% chance of a direct opinionated take on a hot/current story
 
 PERSONA = """
 You are ghostwriting a tweet for Adarsh Sahu (@adarshsahu27), a 23-year-old Senior Software Engineer at HCLTech in Bangalore.
@@ -116,18 +117,28 @@ BAD tweet examples (avoid these patterns entirely):
 """
 
 MENTION_GUIDE = """
-@mentions — add ONLY when the tweet is specifically about that tool/company (never forced):
+@mentions — REQUIRED: every tweet must include at least one @mention, tied naturally to the topic:
 - LangGraph, LangChain, LangSmith → @LangChainAI
 - Deepgram → @DeepgramAI
 - AWS, Bedrock, Lambda, SageMaker → @awscloud
 - Azure, Azure AI Foundry → @Azure
 - LeetCode → @LeetCode
 - FastAPI → @tiangolo
-- OpenAI, GPT → @OpenAI
+- OpenAI, GPT, ChatGPT → @OpenAI
+- Anthropic, Claude → @AnthropicAI
+- Google, Gemini, Google Cloud → @Google or @GoogleCloud
+- Meta, Llama → @AIatMeta
 - HuggingFace → @huggingface
 - Supabase → @supabase
 - Redis → @Redisinc
-Place @mention naturally in the tweet body or at the very end. Never start the tweet with @.
+- NVIDIA, GPUs → @nvidia
+- Hacker News → @HackerNews or @ycombinator
+- xAI, Grok → @xai
+- If the topic doesn't match anything above, tag whichever real company, tool, or person is most
+  relevant to what you're talking about — never skip the mention.
+Place the @mention naturally in the tweet body or at the very end. Never start the tweet with @.
+Use more than one @mention when multiple tools/companies are genuinely relevant, but don't pad
+mentions in just to hit a count.
 """
 
 HASHTAG_GUIDE = """
@@ -147,6 +158,12 @@ CONTENT_BUCKETS = [
     "BJJ and coding: a principle from martial arts that maps onto software or learning",
     "Honest opinion: something you actually believe about AI tools, LLMs, or engineering culture",
     "A genuine question you're curious about, aimed at other engineers",
+    "Current AI industry news: a real reaction to a model release, funding round, or major AI"
+    " announcement that's actually trending right now",
+    "Trending tech topic outside your usual stack: something the whole industry is debating this"
+    " week (new frameworks, layoffs, chip supply, open-source drama, a big outage)",
+    "Diverse hot take: a current event in tech/AI/business that isn't directly about your stack,"
+    " but you have a genuine informed opinion on",
 ]
 
 TWEET_FORMATS = [
@@ -265,10 +282,18 @@ def load_reply_target() -> tuple[str | None, str, bool]:
 def generate_reply(tweet_context: str, is_quote: bool) -> str:
     """Generate a reply or quote-tweet given a plain-text summary of the original tweet."""
     mode = "quote-tweet" if is_quote else "reply"
+    # Replies get an @mention automatically from Twitter's UI; quote-tweets don't, so those need
+    # one written into the text.
+    mention_section = f"\n{MENTION_GUIDE}\n" if is_quote else ""
+    start_rule = (
+        "- You may open with an @mention if it fits naturally, otherwise place it elsewhere in the text"
+        if is_quote else
+        "- Do NOT start with \"@\" — Twitter adds the handle automatically for replies"
+    )
     prompt = f"""You are ghostwriting a {mode} for Adarsh Sahu (@adarshsahu27).
 
 {PERSONA}
-
+{mention_section}
 The tweet Adarsh is responding to:
 "{tweet_context}"
 
@@ -276,7 +301,7 @@ Write ONE {mode} from Adarsh.
 
 Rules:
 - Max 240 characters (leave room for the quoted URL if it's a QT)
-- Do NOT start with "@" — Twitter adds the handle automatically for replies
+{start_rule}
 - Add something: a personal angle, a number from his own experience, a counterpoint, or a specific detail that makes the reply worth reading
 - Do not just agree or just say "this" — add actual signal
 - No em dashes (— or –). Use comma or colon instead.
@@ -320,14 +345,15 @@ def generate_tweet(
     hn_section = ""
     if headlines:
         hn_section = (
-            "\nToday's top HackerNews headlines — use one as a jumping-off point ONLY if it"
-            " genuinely connects to your stack or interests. If none fit, ignore them all:\n"
+            "\nToday's top HackerNews headlines — since this is the only tweet going out today,"
+            " prefer using one of these as a jumping-off point when there's a genuine angle. Pick"
+            " whichever gives the most current, diverse, or interesting take:\n"
             + "\n".join(f"- {h}" for h in headlines)
             + "\n"
         )
 
     length_rule = (
-        "- ONE sentence only, under 80 characters, no hashtags, no @mentions"
+        f"- ONE sentence only, under 100 characters, no hashtags\n{MENTION_GUIDE}"
         if short else
         f"- Max 260 characters\n{MENTION_GUIDE}\n{HASHTAG_GUIDE}"
     )
@@ -502,20 +528,28 @@ async def _post_tweet_async(
                 '[data-testid="tweetButtonInline"]:not([disabled])', timeout=10000
             )
 
+        async def click_post_button(locator) -> None:
+            try:
+                await locator.click(timeout=10000)
+            except Exception:
+                # Fallback for a lingering dropdown/overlay still intercepting pointer events:
+                # a forced click dispatches directly on the button, bypassing the actionability check.
+                await locator.click(force=True)
+
         if reply_to_id:
             await page.goto(f"https://x.com/i/status/{reply_to_id}")
             await page.wait_for_selector('[data-testid="reply"]', timeout=15000)
             await page.click('[data-testid="reply"]')
             await type_into_composer(tweet_text)
-            await page.locator('[data-testid="tweetButton"]').last.click()
+            await click_post_button(page.locator('[data-testid="tweetButton"]').last)
         elif quote_id:
             await page.goto("https://x.com/home")
             await type_into_composer(f"{tweet_text} https://x.com/i/status/{quote_id}")
-            await page.locator('[data-testid="tweetButtonInline"]').first.click()
+            await click_post_button(page.locator('[data-testid="tweetButtonInline"]').first)
         else:
             await page.goto("https://x.com/home")
             await type_into_composer(tweet_text)
-            await page.locator('[data-testid="tweetButtonInline"]').first.click()
+            await click_post_button(page.locator('[data-testid="tweetButtonInline"]').first)
 
         await page.wait_for_timeout(4000)
         await browser.close()
@@ -532,22 +566,23 @@ def post_tweet(
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
+    post_now = "--now" in sys.argv  # skip the randomized delay for manual/immediate runs
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     history = load_history()
 
-    # Hard daily cap — prevents double-posting if cron windows overlap
+    # Hard daily cap — guarantees exactly one post per day even if launchd fires twice
     if not dry_run and tweets_today(history) >= MAX_TWEETS_PER_DAY:
         print(f"[{timestamp}] Already hit {MAX_TWEETS_PER_DAY} tweets today. Skipping.")
         return
 
-    # Random skip (~25% per run) — keeps weekly cadence feeling organic
+    # Random skip — disabled (SKIP_PROBABILITY = 0) since there's only one window per day
     if not dry_run and random.random() < SKIP_PROBABILITY:
         print(f"[{timestamp}] Skipping this window.")
         return
 
-    # Random delay so posts don't land at the exact cron-fire time
-    if not dry_run:
+    # Random delay so the post doesn't land at the exact moment the daily job fires
+    if not dry_run and not post_now:
         delay = random.randint(0, MAX_DELAY_SECONDS)
         print(f"[{timestamp}] Waiting {delay // 60}m {delay % 60}s before posting...")
         time.sleep(delay)
@@ -587,7 +622,7 @@ def main() -> None:
 
     roll = random.random()
 
-    # --- Thread mode (20%) ---
+    # --- Thread mode (15%) ---
     if roll < THREAD_PROBABILITY:
         print(f"[{timestamp}] Thread mode.")
         tweets = generate_thread(history, context, headlines)
@@ -605,7 +640,7 @@ def main() -> None:
             print(f"[ERROR] Failed to post thread: {e}")
             sys.exit(1)
 
-    # --- HN take mode (20%) ---
+    # --- HN take mode (30%) ---
     elif roll < THREAD_PROBABILITY + HN_TAKE_PROBABILITY and headlines:
         print(f"[{timestamp}] HN take mode: {headlines[0][:60]}...")
         tweet = generate_hn_take(headlines[0], history)
@@ -621,7 +656,7 @@ def main() -> None:
             print(f"[ERROR] Failed to post tweet: {e}")
             sys.exit(1)
 
-    # --- Regular single tweet (60%) ---
+    # --- Regular single tweet (55%) ---
     else:
         short = random.random() < SHORT_TWEET_PROBABILITY
         if short:

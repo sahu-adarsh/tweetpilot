@@ -86,7 +86,7 @@ tail -f tweet_agent.log
 
 ## 6. Content Strategy
 
-The agent rotates across 11 content buckets each day:
+The agent posts exactly one tweet per day and rotates across 14 content buckets:
 
 | Bucket | Example |
 |--------|---------|
@@ -101,8 +101,13 @@ The agent rotates across 11 content buckets each day:
 | BJJ meets coding | Discipline and grit applied to software |
 | Hot takes | Confident opinions on AI/engineering trends |
 | Engagement questions | Community debates in AI/backend |
+| Current AI industry news | Reactions to a model release, funding round, or big AI announcement |
+| Trending tech topics | Whatever the industry is debating this week, outside your usual stack |
+| Diverse hot takes | Current events in tech/AI/business you have a real opinion on |
 
-It also adapts to the day of the week (Monday = bold take, Friday = reflection, etc.) and remembers your last 30 tweets to avoid repeating topics.
+Every tweet includes at least one @mention tied naturally to its topic (see `MENTION_GUIDE` in
+`agent.py`). It also adapts to the day of the week (Monday = bold take, Friday = reflection, etc.)
+and remembers your last 30 tweets to avoid repeating topics.
 
 ---
 
